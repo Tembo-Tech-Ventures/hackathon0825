@@ -8,7 +8,7 @@ import { UsernameModal } from '@/components/username-modal/username-modal'
 import { getChatRooms, getMessages, sendMessage, createChatRoom, getChatRoom } from './actions'
 import { ChatRoom, Message } from '@/types'
 
-const fetcher = async (url: string) => {
+const fetcher = async (url: string): Promise<any> => {
   const [action, ...params] = url.split('/')
   
   switch (action) {
@@ -27,6 +27,7 @@ export default function HomePage() {
   const [username, setUsername] = useState<string | null>(null)
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
   const [currentRoomName, setCurrentRoomName] = useState<string>('')
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
 
   // Load username from localStorage on mount
   useEffect(() => {
@@ -43,6 +44,8 @@ export default function HomePage() {
     {
       refreshInterval: 5000, // Poll every 5 seconds
       revalidateOnFocus: true,
+      onSuccess: () => setIsInitialLoading(false),
+      onError: () => setIsInitialLoading(false),
     }
   )
 
@@ -113,13 +116,56 @@ export default function HomePage() {
     return <UsernameModal onSubmit={handleUsernameSubmit} />
   }
 
-  // Show loading state if no rooms are loaded yet
-  if (chatRooms.length === 0) {
+  // Show loading state if we're still loading for the first time
+  if (isInitialLoading) {
     return (
       <div className="h-screen flex items-center justify-center">
         <div className="text-center">
           <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-gray-400">Loading chat rooms...</p>
+        </div>
+      </div>
+    )
+  }
+
+  // Show create first room interface if no rooms exist
+  if (chatRooms.length === 0) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-chat-bg">
+        <div className="text-center max-w-md p-8">
+          <div className="w-20 h-20 bg-primary-600/20 rounded-full flex items-center justify-center mx-auto mb-6">
+            <svg className="w-10 h-10 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold text-white mb-4">Welcome to Chat!</h2>
+          <p className="text-gray-400 mb-8 leading-relaxed">
+            You don't have any chat rooms yet. Create your first room to start chatting with others!
+          </p>
+          <button
+            onClick={handleNewRoom}
+            className="inline-flex items-center gap-3 px-6 py-3 bg-primary-600 hover:bg-primary-700 text-white font-medium rounded-lg transition-colors"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Create Your First Chat Room
+          </button>
+          
+          {/* User info in bottom corner */}
+          <div className="mt-12 pt-6 border-t border-gray-700">
+            <button
+              onClick={handleUsernameChange}
+              className="inline-flex items-center gap-2 text-gray-400 hover:text-gray-300 transition-colors"
+            >
+              <div className="w-6 h-6 bg-primary-600 rounded-full flex items-center justify-center">
+                <span className="text-white text-xs font-medium">
+                  {username.charAt(0).toUpperCase()}
+                </span>
+              </div>
+              <span className="text-sm">Signed in as {username}</span>
+            </button>
+          </div>
         </div>
       </div>
     )
