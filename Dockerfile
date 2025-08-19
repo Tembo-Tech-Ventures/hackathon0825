@@ -20,7 +20,7 @@ COPY . .
 # Generate Prisma client
 RUN npx prisma generate
 
-RUN npm build
+RUN npm run build
 
 # Expose port
 EXPOSE 3000
