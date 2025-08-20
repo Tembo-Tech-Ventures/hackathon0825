@@ -16,6 +16,7 @@ model ChatRoom {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   messages  Message[]
+  searchQueries SearchQuery[]
 
   @@map("chat_rooms")
 }
@@ -29,7 +30,63 @@ model Message {
   updatedAt  DateTime @updatedAt
   
   chatRoom   ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  // Back-relations for search queries linked to this message
+  initiatingSearchQueries SearchQuery[] @relation("InitiatingMessage")
+  botSearchQueries        SearchQuery[] @relation("BotMessage")
 
   @@map("messages")
   @@index([chatRoomId, createdAt])
+}
+
+/// Stores a single Tavily search invocation triggered by a message in a room.
+model SearchQuery {
+  id                 String   @id @default(cuid())
+  chatRoomId         String
+  initiatingMessageId String?  // The user message that triggered the search
+  botMessageId       String?  // The assistant message that used these results
+  query              String
+  createdAt          DateTime @default(now())
+
+  chatRoom           ChatRoom @relation(fields: [chatRoomId], references: [id], onDelete: Cascade)
+  results            SearchResult[]
+  images             SearchImage[]
+
+  // Named relations to Message (no back-relations required here)
+  initiatingMessage  Message? @relation("InitiatingMessage", fields: [initiatingMessageId], references: [id])
+  botMessage         Message? @relation("BotMessage", fields: [botMessageId], references: [id])
+
+  @@index([chatRoomId, createdAt])
+  @@map("search_queries")
+}
+
+/// Individual result item from a Tavily search response.
+model SearchResult {
+  id            String  @id @default(cuid())
+  searchQueryId String
+  title         String
+  url           String
+  snippet       String?
+  score         Float?
+  favicon       String?
+
+  searchQuery   SearchQuery @relation(fields: [searchQueryId], references: [id], onDelete: Cascade)
+
+  @@index([searchQueryId])
+  @@map("search_results")
+}
+
+/// Image reference returned by Tavily for a query (if any).
+model SearchImage {
+  id            String  @id @default(cuid())
+  searchQueryId String
+  url           String
+  alt           String?
+  width         Int?
+  height        Int?
+  sourceUrl     String?
+
+  searchQuery   SearchQuery @relation(fields: [searchQueryId], references: [id], onDelete: Cascade)
+
+  @@index([searchQueryId])
+  @@map("search_images")
 }

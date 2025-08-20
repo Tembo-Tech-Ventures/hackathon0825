@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { Message } from '@/types'
 import { formatTime, formatDate } from '@/lib/utils'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 interface ChatAreaProps {
   messages: Message[]
@@ -26,6 +28,9 @@ export function ChatArea({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [lightboxOpen, setLightboxOpen] = useState(false)
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+  const [lightboxAlt, setLightboxAlt] = useState<string>('')
 
   const scrollToBottom = () => {
     const container = messagesContainerRef.current
@@ -77,6 +82,27 @@ export function ChatArea({
   useEffect(() => {
     adjustTextareaHeight()
   }, [inputValue])
+
+  const openLightbox = (src: string, alt?: string) => {
+    setLightboxSrc(src)
+    setLightboxAlt(alt || 'image')
+    setLightboxOpen(true)
+  }
+
+  const closeLightbox = () => {
+    setLightboxOpen(false)
+    setLightboxSrc(null)
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeLightbox()
+    }
+    if (lightboxOpen) {
+      window.addEventListener('keydown', onKey)
+    }
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightboxOpen])
 
   const groupedMessages = messages.reduce((groups: { date: string; messages: Message[] }[], message) => {
     const messageDate = formatDate(new Date(message.createdAt))
@@ -160,7 +186,69 @@ export function ChatArea({
                           </span>
                         </div>
                         <div className="text-gray-100 whitespace-pre-wrap break-words">
-                          {message.content}
+                          {message.username === 'Cerebras Bot' ? (
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                a: ({ ...props }) => (
+                                  <a
+                                    {...props}
+                                    className="text-primary-400 hover:underline break-words"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                  />
+                                ),
+                                img: ({ ...props }) => {
+                                  const src = props.src as string
+                                  const alt = (props.alt as string) || 'image'
+                                  return (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img
+                                      {...props}
+                                      onClick={() => src && openLightbox(src, alt)}
+                                      role="button"
+                                      tabIndex={0}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter' || e.key === ' ') src && openLightbox(src, alt)
+                                      }}
+                                      className="h-24 w-24 object-cover rounded-md border border-gray-700 inline-block align-top cursor-zoom-in"
+                                      alt={alt}
+                                    />
+                                  )
+                                },
+                                p: (props) => {
+                                  const node: any = (props as any).node
+                                  const hasImg = Array.isArray(node?.children) && node.children.some((c: any) => c?.tagName === 'img')
+                                  const cn = [
+                                    (props as any).className,
+                                    hasImg ? 'mb-2 flex flex-wrap gap-2 items-start' : 'mb-2 leading-relaxed',
+                                  ]
+                                    .filter(Boolean)
+                                    .join(' ')
+                                  return <p {...props} className={cn} />
+                                },
+                                ul: ({ ...props }) => (
+                                  <ul {...props} className="list-disc ml-5 mb-2 space-y-1" />
+                                ),
+                                ol: ({ ...props }) => (
+                                  <ol {...props} className="list-decimal ml-5 mb-2 space-y-1" />
+                                ),
+                                code: ({ ...props }) => {
+                                  const isInline = Boolean((props as any).inline)
+                                  return (
+                                    <code
+                                      {...props}
+                                      className={`bg-gray-800/60 rounded px-1 ${isInline ? '' : 'block p-2 overflow-x-auto'}`}
+                                    />
+                                  )
+                                },
+                              }}
+                            >
+                              {message.content}
+                            </ReactMarkdown>
+                          ) : (
+                            message.content
+                          )}
                         </div>
                       </div>
                     </div>
@@ -206,6 +294,34 @@ export function ChatArea({
           </div>
         </form>
       </div>
+
+      {/* Lightbox */}
+      {lightboxOpen && lightboxSrc && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          onClick={closeLightbox}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="relative max-w-[90vw] max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={lightboxSrc}
+              alt={lightboxAlt || 'image'}
+              className="max-w-[90vw] max-h-[90vh] object-contain rounded-md shadow-2xl"
+            />
+            <button
+              onClick={closeLightbox}
+              aria-label="Close"
+              className="absolute -top-3 -right-3 bg-gray-900 text-white rounded-full p-2 shadow-lg hover:bg-gray-800"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
