@@ -5,7 +5,8 @@ import useSWR from 'swr'
 import { Sidebar } from '@/components/sidebar/sidebar'
 import { ChatArea } from '@/components/chat-area/chat-area'
 import { UsernameModal } from '@/components/username-modal/username-modal'
-import { getChatRooms, getMessages, sendMessage, createChatRoom, getChatRoom } from './actions'
+import { getChatRooms, getMessages, sendMessage, createChatRoom, getChatRoom, renameChatRoom } from './actions'
+import { RoomNameModal } from '@/components/room-name-modal/room-name-modal'
 import { ChatRoom, Message } from '@/types'
 
 const fetcher = async (url: string): Promise<any> => {
@@ -28,6 +29,9 @@ export default function HomePage() {
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
   const [currentRoomName, setCurrentRoomName] = useState<string>('')
   const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [isRoomNameModalOpen, setIsRoomNameModalOpen] = useState(false)
+  const [roomNameModalDefault, setRoomNameModalDefault] = useState('')
+  const [roomNameModalMode, setRoomNameModalMode] = useState<'create' | 'rename'>('create')
 
   // Load username from localStorage on mount
   useEffect(() => {
@@ -87,13 +91,37 @@ export default function HomePage() {
   }
 
   const handleNewRoom = async () => {
-    const roomName = `Chat Room ${chatRooms.length + 1}`
-    const result = await createChatRoom(roomName)
-    
-    if (result.success) {
-      await mutateChatRooms()
-      handleRoomSelect(result.chatRoom!.id)
+    setRoomNameModalMode('create')
+    setRoomNameModalDefault('')
+    setIsRoomNameModalOpen(true)
+  }
+
+  const handleRenameRoom = () => {
+    if (!currentRoomId) return
+    setRoomNameModalMode('rename')
+    setRoomNameModalDefault(currentRoomName)
+    setIsRoomNameModalOpen(true)
+  }
+
+  const handleRoomNameSubmit = async (name: string) => {
+    if (roomNameModalMode === 'create') {
+      const result = await createChatRoom(name)
+      if (result.success) {
+        await mutateChatRooms()
+        await handleRoomSelect(result.chatRoom!.id)
+      }
+    } else if (roomNameModalMode === 'rename' && currentRoomId) {
+      const result = await renameChatRoom(currentRoomId, name)
+      if (result.success) {
+        setCurrentRoomName(result.chatRoom!.name)
+        await mutateChatRooms()
+      }
     }
+    setIsRoomNameModalOpen(false)
+  }
+
+  const handleRoomNameCancel = () => {
+    setIsRoomNameModalOpen(false)
   }
 
   const handleSendMessage = async (content: string) => {
@@ -167,6 +195,16 @@ export default function HomePage() {
             </button>
           </div>
         </div>
+
+        {isRoomNameModalOpen && (
+          <RoomNameModal
+            title={roomNameModalMode === 'create' ? 'Create Chat Room' : 'Rename Chat Room'}
+            defaultValue={roomNameModalDefault}
+            submitLabel={roomNameModalMode === 'create' ? 'Create' : 'Rename'}
+            onSubmit={handleRoomNameSubmit}
+            onCancel={handleRoomNameCancel}
+          />
+        )}
       </div>
     )
   }
@@ -182,13 +220,14 @@ export default function HomePage() {
         onUsernameChange={handleUsernameChange}
       />
       
-      <div className="flex-1 flex flex-col lg:ml-0">
+      <div className="flex-1 min-h-0 flex flex-col lg:ml-0">
         {currentRoomId ? (
           <ChatArea
             messages={messages}
             currentRoomName={currentRoomName}
             username={username}
             onSendMessage={handleSendMessage}
+            onRenameRoom={handleRenameRoom}
           />
         ) : (
           <div className="flex-1 flex items-center justify-center p-4">
@@ -204,6 +243,16 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
+      {isRoomNameModalOpen && (
+        <RoomNameModal
+          title={roomNameModalMode === 'create' ? 'Create Chat Room' : 'Rename Chat Room'}
+          defaultValue={roomNameModalDefault}
+          submitLabel={roomNameModalMode === 'create' ? 'Create' : 'Rename'}
+          onSubmit={handleRoomNameSubmit}
+          onCancel={handleRoomNameCancel}
+        />
+      )}
     </div>
   )
 }

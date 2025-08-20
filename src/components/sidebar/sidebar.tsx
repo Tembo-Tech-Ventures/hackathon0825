@@ -51,7 +51,8 @@ export function Sidebar({
 
       <div className={cn(
         "bg-chat-sidebar border-r border-gray-700 flex flex-col transition-all duration-300",
-        "fixed lg:relative inset-y-0 left-0 z-50",
+        // Mobile: fixed overlay; Desktop: normal flow
+        "fixed inset-y-0 left-0 z-50 lg:relative lg:inset-auto lg:left-auto lg:h-full",
         isCollapsed ? "w-16" : "w-80",
         isMobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0"
       )}>

@@ -6,6 +6,8 @@ services:
       target: development
     ports:
       - "3000:3000"
+    env_file:
+      - .env.local
     environment:
       - NODE_ENV=development
       - DATABASE_URL=postgresql://postgres:password@db:5432/chatapp?schema=public

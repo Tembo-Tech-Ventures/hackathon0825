@@ -10,6 +10,7 @@ interface ChatAreaProps {
   username: string
   onSendMessage: (content: string) => Promise<void>
   isLoading?: boolean
+  onRenameRoom?: () => void
 }
 
 export function ChatArea({
@@ -18,14 +19,22 @@ export function ChatArea({
   username,
   onSendMessage,
   isLoading = false,
+  onRenameRoom,
 }: ChatAreaProps) {
   const [inputValue, setInputValue] = useState('')
   const [isSending, setIsSending] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const container = messagesContainerRef.current
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+    } else {
+      // Fallback
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
   }
 
   useEffect(() => {
@@ -83,15 +92,29 @@ export function ChatArea({
   }, [])
 
   return (
-    <div className="flex-1 flex flex-col">
+    <div className="flex-1 min-h-0 flex flex-col">
       {/* Header */}
       <div className="bg-chat-sidebar border-b border-gray-700 p-4">
-        <h2 className="text-xl font-semibold text-white">{currentRoomName}</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-xl font-semibold text-white truncate">{currentRoomName}</h2>
+          {onRenameRoom && (
+            <button
+              onClick={onRenameRoom}
+              className="p-2 rounded-md hover:bg-gray-700 text-gray-300"
+              title="Rename room"
+              aria-label="Rename room"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
+          )}
+        </div>
         <p className="text-gray-400 text-sm">{messages.length} messages</p>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto">
         {groupedMessages.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
