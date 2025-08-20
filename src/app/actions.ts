@@ -134,7 +134,7 @@ export async function sendMessage(chatRoomId: string, username: string, content:
               'You are a helpful assistant in a small team chat app. Be concise and directly answer the latest user message. If context is ambiguous, ask a brief clarifying question. Do not include your name or any speaker label in your replies; respond with the message content only.',
           },
           ...history.map((m: { username: string; content: string }) => ({
-            role: m.username === BOT_USERNAME ? 'assistant' : 'user',
+            role: (m.username === BOT_USERNAME ? 'assistant' : 'user') as 'assistant' | 'user',
             content: m.content,
           })),
         ]
@@ -144,7 +144,7 @@ export async function sendMessage(chatRoomId: string, username: string, content:
           model: 'llama3.1-8b',
         })
 
-        const aiText = (completion?.choices?.[0]?.message as any)?.content as string | undefined
+        const aiText = ((completion?.choices as any)?.[0]?.message as any)?.content as string | undefined
         if (aiText && aiText.trim()) {
           // Strip any accidental speaker prefixes like "Cerebras Bot:" or "Assistant:"
           const cleaned = aiText
