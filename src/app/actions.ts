@@ -93,6 +93,85 @@ function heuristicsNeedsSearch(message: string): boolean {
   return hasStrong || hasTimeSensitive || (hasDomain && isQuestiony)
 }
 
+// Contextual variant: decide search using recent conversation so we avoid searching
+// when the user is clearly replying to a human or asking for clarification that
+// can be answered from the existing context.
+async function classifyNeedsSearchContextual(
+  history: Array<{ username: string; content: string }>,
+  botUsername: string,
+  currentUsername: string,
+  shouldRespondHint: boolean,
+): Promise<boolean> {
+  const latest = history[history.length - 1]
+  const message = latest?.content || ''
+  const heuristicHint = heuristicsNeedsSearch(message)
+  // Signals used in both fallback and LLM path
+  const timeSensitive = isTimeSensitiveQuery(message)
+  const questionLike = /\?$/.test(message.trim()) || /\b(what|how|when|where|who|which|why|list|top|best|examples|according to)\b/i.test(message)
+
+  // If respond-gate said NO, do not search.
+  if (!shouldRespondHint) {
+    console.log('classifyNeedsSearchContextual: respond gate -> NO, skip search')
+    return false
+  }
+
+  // No LLM available: be liberal using signals
+  if (!process.env.CEREBRAS_API_KEY) {
+    const decision = heuristicHint || timeSensitive || questionLike
+    console.log('classifyNeedsSearchContextual: no LLM, signals ->', { heuristicHint, timeSensitive, questionLike, decision })
+    return decision
+  }
+
+  // If it's plainly a factual/question-like request or time-sensitive, prefer searching without LLM.
+  if (heuristicHint || timeSensitive || questionLike) {
+    console.log('classifyNeedsSearchContextual: heuristic/question/time -> YES')
+    return true
+  }
+
+  try {
+    const recent = history.slice(-8)
+    const convo = recent
+      .map((m) => {
+        const speaker = m.username === botUsername ? 'ASSISTANT' : `USER(${m.username})`
+        const text = (m.content || '').replace(/\s+/g, ' ').slice(0, 500)
+        return `${speaker}: ${text}`
+      })
+      .join('\n')
+
+    const classify = await withRetry(() =>
+      cerebrasClient.chat.completions.create({
+        model: 'llama3.1-8b',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a search-decision classifier in a group chat. Decide whether the assistant should perform an external web search for the latest message.\n' +
+              '- Reply YES if the latest message seeks factual/grounded information, recent updates, statistics, sources, links, or citations, and up-to-date web results would materially improve the answer beyond the provided conversation.\n' +
+              "- Reply NO if the latest message is clearly directed at a specific human user's prior message (not the assistant or the same user), or is a clarification/follow-up that can be answered from the existing conversation context, or is chit-chat/opinion.\n" +
+              'Reply ONLY YES or NO.',
+          },
+          {
+            role: 'user',
+            content:
+              `Conversation (most recent last):\n${convo}\n\n` +
+              `Latest message: ${message}\n` +
+              `Signals -> timeSensitive: ${timeSensitive}, questionLike: ${questionLike}, heuristicHint: ${heuristicHint}, currentUser: ${currentUsername}\n` +
+              'Should the assistant perform an external web search now?',
+          },
+        ],
+      })
+    )
+    const cls: any = classify
+    const decision = String(cls?.choices?.[0]?.message?.content ?? '').trim().toUpperCase()
+    console.log('classifyNeedsSearchContextual (LLM):', { decision })
+    return decision.startsWith('Y')
+  } catch (e) {
+    console.error('Search contextual classification failed:', e)
+    // Fail-open to heuristics so we still search when it looks clearly factual
+    return heuristicHint
+  }
+}
+
 async function classifyNeedsSearch(message: string): Promise<boolean> {
   // Fast path: heuristics only
   if (heuristicsNeedsSearch(message)) {
@@ -130,6 +209,56 @@ async function classifyNeedsSearch(message: string): Promise<boolean> {
   } catch (e) {
     console.error('Search classification failed:', e)
     return false
+  }
+}
+
+// Decide whether the assistant should respond at all based on recent context.
+// Returns true if the latest message is directed to the assistant or a general question,
+// false if it clearly targets a specific human's prior message (not the assistant).
+async function classifyShouldRespond(
+  history: Array<{ username: string; content: string }>,
+  botUsername: string,
+): Promise<boolean> {
+  if (!process.env.CEREBRAS_API_KEY) {
+    // No LLM available; default to allowing response
+    return true
+  }
+  try {
+    const recent = history.slice(-8)
+    const convo = recent
+      .map((m) => {
+        const speaker = m.username === botUsername ? 'ASSISTANT' : `USER(${m.username})`
+        const text = (m.content || '').replace(/\s+/g, ' ').slice(0, 500)
+        return `${speaker}: ${text}`
+      })
+      .join('\n')
+
+    const classify = await withRetry(() =>
+      cerebrasClient.chat.completions.create({
+        model: 'llama3.1-8b',
+        messages: [
+          {
+            role: 'system',
+            content:
+              'You are a group-chat classifier that decides if the assistant should respond to the latest message.\n' +
+              '- Reply YES if the latest message is addressed to the assistant, is a clear reply to the assistant, or is a general question not clearly directed to a specific human.\n' +
+              "- Reply NO if the latest message is clearly directed to a specific human user's prior message (e.g., clarifying their point or asking them to share something) and the assistant was not the author of that prior message.\n" +
+              'Reply with ONLY YES or NO.',
+          },
+          {
+            role: 'user',
+            content: `Conversation (most recent last):\n${convo}\n\nShould the assistant respond?`,
+          },
+        ],
+      })
+    )
+    const cls: any = classify
+    const decision = String(cls?.choices?.[0]?.message?.content ?? '').trim().toUpperCase()
+    console.log('classifyShouldRespond (LLM):', { decision })
+    return decision.startsWith('Y')
+  } catch (e) {
+    console.error('Respond classification failed:', e)
+    return true // Fail-open so we don't drop important replies
   }
 }
 
@@ -295,44 +424,31 @@ export async function sendMessage(chatRoomId: string, username: string, content:
     let shouldInvokeAI = keywordTrigger || heuristicInvoke
     console.log('sendMessage: initial AI invocation check', { keywordTrigger, heuristicInvoke })
 
-    // If no keyword trigger, but previous message was from the bot, classify if this is a reply to the AI
-    if (!shouldInvokeAI && process.env.CEREBRAS_API_KEY) {
-      const recentTwo = await prisma.message.findMany({
+    // Respond gate: use LLM over recent context to decide if assistant should respond at all
+    let shouldRespond = true
+    try {
+      const recentForGate = await prisma.message.findMany({
         where: { chatRoomId },
         orderBy: { createdAt: 'desc' },
-        take: 2,
+        take: 8,
       })
-      const prev = recentTwo.find((m: { id: string; username: string; content: string }) => m.id !== message.id)
-      if (prev && prev.username === BOT_USERNAME) {
-        try {
-          const classify = await cerebrasClient.chat.completions.create({
-            model: 'llama3.1-8b',
-            messages: [
-              {
-                role: 'system',
-                content:
-                  'You are a classifier. Decide if the USER message is a direct response to the ASSISTANT message. Reply with ONLY "YES" or "NO" with no punctuation.',
-              },
-              {
-                role: 'user',
-                content: `ASSISTANT: ${prev.content}\nUSER: ${content}\nIs the USER replying to the ASSISTANT?`,
-              },
-            ],
-          })
-          const cls: any = classify
-          const decision = String(cls?.choices?.[0]?.message?.content ?? '')
-            .trim()
-            .toUpperCase()
-          if (decision.startsWith('Y')) {
-            shouldInvokeAI = true
-          }
-        } catch (aiErr) {
-          console.error('AI reply-classification failed:', aiErr)
-        }
-      }
+      const historyAsc = recentForGate.reverse().map((m) => ({ username: m.username, content: m.content }))
+      shouldRespond = await classifyShouldRespond(historyAsc, BOT_USERNAME)
+    } catch (gateErr) {
+      console.error('sendMessage: respond gate fetch/classify failed; defaulting to respond', gateErr)
+      shouldRespond = true
     }
 
-    console.log('sendMessage: shouldInvokeAI final', { keywordTrigger, heuristicInvoke, shouldInvokeAI })
+    // Final decision (double-check):
+    // - If LLM available: assistant responds only if gate says YES AND there is a trigger (keyword or heuristic/question).
+    // - If no LLM key: fall back to trigger only.
+    if (process.env.CEREBRAS_API_KEY) {
+      shouldInvokeAI = shouldRespond && (keywordTrigger || heuristicInvoke)
+    } else {
+      shouldInvokeAI = keywordTrigger || heuristicInvoke
+    }
+
+    console.log('sendMessage: shouldInvokeAI final', { keywordTrigger, heuristicInvoke, shouldRespond, shouldInvokeAI })
     if (shouldInvokeAI && process.env.CEREBRAS_API_KEY) {
       try {
         // Fetch last 10 messages for context (most recent first), then reverse to chronological order
@@ -356,11 +472,16 @@ export async function sendMessage(chatRoomId: string, username: string, content:
           })),
         ]
 
-        // Determine if this needs factual search and enrich context
+        // Determine if this needs factual search and enrich context (contextual decision)
         let sourcesMd = ''
         let searchQueryId: string | null = null
-        const needsSearch = await classifyNeedsSearch(content)
-        console.log('sendMessage: needsSearch', { needsSearch })
+        const needsSearch = await classifyNeedsSearchContextual(
+          history.map((m: { username: string; content: string }) => ({ username: m.username, content: m.content })),
+          BOT_USERNAME,
+          username,
+          shouldRespond,
+        )
+        console.log('sendMessage: needsSearch (contextual)', { needsSearch })
         if (needsSearch) {
           try {
             const built = buildSearchQuery(content)
