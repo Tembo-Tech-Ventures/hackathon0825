@@ -2,284 +2,35 @@
 
 import { prisma } from '@/lib/prisma'
 import { revalidatePath } from 'next/cache'
-import '@cerebras/cerebras_cloud_sdk/shims/web'
-import Cerebras from '@cerebras/cerebras_cloud_sdk'
 import { withRetry } from '@/lib/retry'
 import { tavilySearch } from '@/lib/tavily'
+import {
+  cerebrasClient,
+  heuristicsNeedsSearch,
+  classifyNeedsSearchContextual,
+  classifyShouldRespond,
+  isTimeSensitiveQuery,
+  rewriteSearchQuery,
+} from '@/lib/llm'
 
 const BOT_USERNAME = 'Cerebras Bot'
-const cerebrasClient = new Cerebras({
-  apiKey: process.env.CEREBRAS_API_KEY,
-})
 
-function heuristicsNeedsSearch(message: string): boolean {
-  const text = message.toLowerCase()
-  const strongIndicators = [
-    'source',
-    'sources',
-    'cite',
-    'citation',
-    'reference',
-    'references',
-    'link',
-    'links',
-    'url',
-    'article',
-    'articles',
-    'blog',
-    'blogs',
-    'paper',
-    'papers',
-    'study',
-    'studies',
-    'news',
-    'report',
-    'reports',
-    'case study',
-    'case studies',
-    'best practices',
-    'whitepaper',
-    'reading list',
-    'resources',
-    'docs',
-    'documentation',
-    // extra liberal signals
-    'guides',
-    'playbook',
-  ]
-  const timeSensitiveIndicators = [
-    'latest',
-    'current',
-    'today',
-    'this week',
-    'recent',
-    'recently',
-    'update',
-    'updates',
-    'trending',
-    'these days',
-    'currently',
-    'right now',
-    '2024',
-    '2025',
-  ]
-  const domainSignals = [
-    'industry',
-    'market',
-    'landscape',
-    'state of',
-    'overview',
-    'benchmark',
-    'benchmarks',
-  ]
-  const questionyIndicators = [
-    'what',
-    'how',
-    'when',
-    'where',
-    'who',
-    'which',
-    'list',
-    'top',
-    'best',
-    'examples',
-    'how to',
-    'according to',
-  ]
-  const hasStrong = strongIndicators.some((s) => text.includes(s))
-  const hasTimeSensitive = timeSensitiveIndicators.some((s) => text.includes(s))
-  const hasDomain = domainSignals.some((s) => text.includes(s))
-  const isQuestiony = questionyIndicators.some((q) => text.includes(q)) || /\?$/.test(message.trim())
-  return hasStrong || hasTimeSensitive || (hasDomain && isQuestiony)
-}
-
-// Contextual variant: decide search using recent conversation so we avoid searching
-// when the user is clearly replying to a human or asking for clarification that
-// can be answered from the existing context.
-async function classifyNeedsSearchContextual(
-  history: Array<{ username: string; content: string }>,
-  botUsername: string,
-  currentUsername: string,
-  shouldRespondHint: boolean,
-): Promise<boolean> {
-  const latest = history[history.length - 1]
-  const message = latest?.content || ''
-  const heuristicHint = heuristicsNeedsSearch(message)
-  // Signals used in both fallback and LLM path
-  const timeSensitive = isTimeSensitiveQuery(message)
-  const questionLike = /\?$/.test(message.trim()) || /\b(what|how|when|where|who|which|why|list|top|best|examples|according to)\b/i.test(message)
-
-  // If respond-gate said NO, do not search.
-  if (!shouldRespondHint) {
-    console.log('classifyNeedsSearchContextual: respond gate -> NO, skip search')
-    return false
-  }
-
-  // No LLM available: be liberal using signals
-  if (!process.env.CEREBRAS_API_KEY) {
-    const decision = heuristicHint || timeSensitive || questionLike
-    console.log('classifyNeedsSearchContextual: no LLM, signals ->', { heuristicHint, timeSensitive, questionLike, decision })
-    return decision
-  }
-
-  // If it's plainly a factual/question-like request or time-sensitive, prefer searching without LLM.
-  if (heuristicHint || timeSensitive || questionLike) {
-    console.log('classifyNeedsSearchContextual: heuristic/question/time -> YES')
-    return true
-  }
-
-  try {
-    const recent = history.slice(-8)
-    const convo = recent
-      .map((m) => {
-        const speaker = m.username === botUsername ? 'ASSISTANT' : `USER(${m.username})`
-        const text = (m.content || '').replace(/\s+/g, ' ').slice(0, 500)
-        return `${speaker}: ${text}`
-      })
-      .join('\n')
-
-    const classify = await withRetry(() =>
-      cerebrasClient.chat.completions.create({
-        model: 'llama3.1-8b',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a search-decision classifier in a group chat. Decide whether the assistant should perform an external web search for the latest message.\n' +
-              '- Reply YES if the latest message seeks factual/grounded information, recent updates, statistics, sources, links, or citations, and up-to-date web results would materially improve the answer beyond the provided conversation.\n' +
-              "- Reply NO if the latest message is clearly directed at a specific human user's prior message (not the assistant or the same user), or is a clarification/follow-up that can be answered from the existing conversation context, or is chit-chat/opinion.\n" +
-              'Reply ONLY YES or NO.',
-          },
-          {
-            role: 'user',
-            content:
-              `Conversation (most recent last):\n${convo}\n\n` +
-              `Latest message: ${message}\n` +
-              `Signals -> timeSensitive: ${timeSensitive}, questionLike: ${questionLike}, heuristicHint: ${heuristicHint}, currentUser: ${currentUsername}\n` +
-              'Should the assistant perform an external web search now?',
-          },
-        ],
-      })
-    )
-    const cls: any = classify
-    const decision = String(cls?.choices?.[0]?.message?.content ?? '').trim().toUpperCase()
-    console.log('classifyNeedsSearchContextual (LLM):', { decision })
-    return decision.startsWith('Y')
-  } catch (e) {
-    console.error('Search contextual classification failed:', e)
-    // Fail-open to heuristics so we still search when it looks clearly factual
-    return heuristicHint
-  }
-}
-
-async function classifyNeedsSearch(message: string): Promise<boolean> {
-  // Fast path: heuristics only
-  if (heuristicsNeedsSearch(message)) {
-    console.log('classifyNeedsSearch: heuristic -> YES', { inputSnippet: message.slice(0, 120) })
-    return true
-  }
-
-  if (!process.env.CEREBRAS_API_KEY) {
-    console.warn('classifyNeedsSearch: CEREBRAS_API_KEY missing; skipping search classification')
-    return false
-  }
-  try {
-    const classify = await withRetry(() =>
-      cerebrasClient.chat.completions.create({
-        model: 'llama3.1-8b',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a classifier that errs on the side of using external web search. Reply YES if external factual lookup, recent information, examples, articles, sources, best practices, or references would improve answer quality. Reply NO only if the message is clearly opinion, chit-chat, or can be answered confidently without web context. Reply with ONLY "YES" or "NO".',
-          },
-          { role: 'user', content: message },
-        ],
-      })
-    )
-    const cls: any = classify
-    const decision = String(cls?.choices?.[0]?.message?.content ?? '')
-      .trim()
-      .toUpperCase()
-    console.log('classifyNeedsSearch (LLM):', {
-      decision,
-      inputSnippet: message.slice(0, 120),
-    })
-    return decision.startsWith('Y')
-  } catch (e) {
-    console.error('Search classification failed:', e)
-    return false
-  }
-}
-
-// Decide whether the assistant should respond at all based on recent context.
-// Returns true if the latest message is directed to the assistant or a general question,
-// false if it clearly targets a specific human's prior message (not the assistant).
-async function classifyShouldRespond(
-  history: Array<{ username: string; content: string }>,
-  botUsername: string,
-): Promise<boolean> {
-  if (!process.env.CEREBRAS_API_KEY) {
-    // No LLM available; default to allowing response
-    return true
-  }
-  try {
-    const recent = history.slice(-8)
-    const convo = recent
-      .map((m) => {
-        const speaker = m.username === botUsername ? 'ASSISTANT' : `USER(${m.username})`
-        const text = (m.content || '').replace(/\s+/g, ' ').slice(0, 500)
-        return `${speaker}: ${text}`
-      })
-      .join('\n')
-
-    const classify = await withRetry(() =>
-      cerebrasClient.chat.completions.create({
-        model: 'llama3.1-8b',
-        messages: [
-          {
-            role: 'system',
-            content:
-              'You are a group-chat classifier that decides if the assistant should respond to the latest message.\n' +
-              '- Reply YES if the latest message is addressed to the assistant, is a clear reply to the assistant, or is a general question not clearly directed to a specific human.\n' +
-              "- Reply NO if the latest message is clearly directed to a specific human user's prior message (e.g., clarifying their point or asking them to share something) and the assistant was not the author of that prior message.\n" +
-              'Reply with ONLY YES or NO.',
-          },
-          {
-            role: 'user',
-            content: `Conversation (most recent last):\n${convo}\n\nShould the assistant respond?`,
-          },
-        ],
-      })
-    )
-    const cls: any = classify
-    const decision = String(cls?.choices?.[0]?.message?.content ?? '').trim().toUpperCase()
-    console.log('classifyShouldRespond (LLM):', { decision })
-    return decision.startsWith('Y')
-  } catch (e) {
-    console.error('Respond classification failed:', e)
-    return true // Fail-open so we don't drop important replies
-  }
-}
-
-// Detect if a query is time-sensitive (should bias to recent updates)
-function isTimeSensitiveQuery(message: string): boolean {
-  const t = message.toLowerCase()
-  return (
-    /\b(latest|current|today|this week|recent|recently|update|updates|trending|breaking|these days|right now)\b/.test(t) ||
-    /\b20\d{2}\b/.test(t) ||
-    /\b(past|last)\s+\d+\s+(days|day|weeks|week|months|month)\b/.test(t)
-  )
-}
-
-// Build a search-oriented query, optionally biasing toward recency
-function buildSearchQuery(original: string): { query: string; timeSensitive: boolean } {
+// Build a search-oriented query. Uses LLM to rewrite into high-signal query; falls back to heuristics.
+async function buildSearchQuery(original: string): Promise<{ query: string; timeSensitive: boolean }> {
   const trimmed = original.replace(/^\s*(bot|ai)\s*[:,]?\s*/i, '').trim()
   const timeSensitive = isTimeSensitiveQuery(trimmed)
+  // Try LLM rewrite first
+  try {
+    const { query } = await rewriteSearchQuery(trimmed, { timeSensitive })
+    if (query && query !== trimmed) {
+      return { query, timeSensitive }
+    }
+  } catch (e) {
+    console.warn('buildSearchQuery: LLM rewrite failed, falling back', e)
+  }
+  // Heuristic fallback: if time-sensitive, nudge recency
   if (timeSensitive) {
-    // Nudge Tavily toward recency via phrasing
-    const q = `${trimmed} recent notable developments last 21 days`
-    return { query: q, timeSensitive }
+    return { query: `${trimmed} recent notable developments last 21 days`, timeSensitive }
   }
   return { query: trimmed, timeSensitive }
 }
@@ -484,13 +235,31 @@ export async function sendMessage(chatRoomId: string, username: string, content:
         console.log('sendMessage: needsSearch (contextual)', { needsSearch })
         if (needsSearch) {
           try {
-            const built = buildSearchQuery(content)
-            console.log('sendMessage: invoking tavilySearch', { query: built.query, timeSensitive: built.timeSensitive })
-            const search = await tavilySearch(built.query, {
+            const built = await buildSearchQuery(content)
+            const tavilyStart = Date.now()
+            const searchDepth: 'basic' | 'advanced' = built.timeSensitive ? 'advanced' : 'basic'
+            const tavilyOptions = {
               includeImages: true,
               includeAnswer: true,
               maxResults: 8,
-              searchDepth: built.timeSensitive ? 'advanced' : 'basic',
+              searchDepth,
+            }
+            console.log('TAVILY INVOKE: START', {
+              chatRoomId,
+              messageId: message.id,
+              hasApiKey: Boolean(process.env.TAVILY_API_KEY),
+              query: built.query,
+              options: tavilyOptions,
+            })
+            const search = await tavilySearch(built.query, {
+              ...tavilyOptions,
+            })
+            console.log('TAVILY INVOKE: DONE', {
+              chatRoomId,
+              messageId: message.id,
+              ms: Date.now() - tavilyStart,
+              results: search.results?.length || 0,
+              images: search.images?.length || 0,
             })
             // Rank results with recency/authority boost when time-sensitive
             const sortedResults = rankSearchResults(search.results ?? [], built.timeSensitive)

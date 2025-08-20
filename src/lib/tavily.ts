@@ -33,6 +33,7 @@ export async function tavilySearch(
 ): Promise<TavilySearchResponse> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) {
+    console.warn("TAVILY LIB: Missing TAVILY_API_KEY");
     throw new Error("Missing TAVILY_API_KEY");
   }
   const url = "https://api.tavily.com/search";
@@ -42,13 +43,40 @@ export async function tavilySearch(
   if (includeAnswer) body.include_answer = true;
   if (typeof maxResults === 'number') body.max_results = maxResults;
 
-  const res = await fetchWithRetry(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
+  const start = Date.now();
+  console.log("TAVILY LIB: START", {
+    query,
+    includeImages,
+    searchDepth,
+    includeAnswer,
+    maxResults,
+    url,
   });
-  return (await res.json()) as TavilySearchResponse;
+  try {
+    const res = await fetchWithRetry(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+    console.log("TAVILY LIB: HTTP OK", { status: res.status, ms: Date.now() - start });
+    const data = (await res.json()) as TavilySearchResponse;
+    console.log("TAVILY LIB: DONE", {
+      ms: Date.now() - start,
+      results: data?.results?.length || 0,
+      images: data?.images?.length || 0,
+      auto_parameters: data?.auto_parameters,
+      response_time: data?.response_time,
+    });
+    return data;
+  } catch (err: any) {
+    console.error("TAVILY LIB: ERROR", {
+      ms: Date.now() - start,
+      message: err?.message || String(err),
+      status: (err as any)?.status,
+    });
+    throw err;
+  }
 }
