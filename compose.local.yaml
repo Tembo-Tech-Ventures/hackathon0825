@@ -11,6 +11,8 @@ services:
     environment:
       - NODE_ENV=development
       - DATABASE_URL=postgresql://postgres:password@db:5432/chatapp?schema=public
+    entrypoint: []
+    command: ["npm", "run", "dev"]
     volumes:
       - .:/app
       - /app/node_modules
