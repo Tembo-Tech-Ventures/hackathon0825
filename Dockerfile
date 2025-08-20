@@ -25,5 +25,8 @@ RUN npm run build
 # Expose port
 EXPOSE 3000
 
-# Start development server
-CMD ["npm", "run", "start"]
+# Ensure entrypoint is executable and use it to run migrations before starting the server
+RUN chmod +x ./entrypoint.sh
+
+# Start production server via entrypoint (runs migrations, then next start)
+CMD ["./entrypoint.sh"]
