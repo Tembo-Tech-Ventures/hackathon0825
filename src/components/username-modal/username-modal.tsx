@@ -41,9 +41,9 @@ export function UsernameModal({ onSubmit }: UsernameModalProps) {
           <button
             type="submit"
             className="chat-button w-full"
-            disabled={!username.trim()}
+            disabled={username.trim().length === 0}
           >
-            Start Chatting
+            Start Chatting, {username}
           </button>
         </form>
       </div>

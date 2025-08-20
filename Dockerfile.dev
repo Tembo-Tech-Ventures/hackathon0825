@@ -1,4 +1,12 @@
-FROM node:18-alpine AS development
+FROM node:18-slim AS development
+
+# Add bullseye repo to fetch libssl1.1
+RUN apt-get update \
+ && apt-get install -y wget gnupg \
+ && echo "deb http://deb.debian.org/debian bullseye main" >> /etc/apt/sources.list \
+ && apt-get update \
+ && apt-get install -y libssl1.1 openssl \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
